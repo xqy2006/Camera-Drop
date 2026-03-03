@@ -6,16 +6,26 @@ extern "C" {
     #include <wirehair/wirehair.h>
 }
 
+#include <mutex>
 #include <vector>
 #include <memory>
-#include <unordered_map>
+
+// 确保 wirehair_init 全局只被调用一次
+inline void wirehair_init_once() {
+    static std::once_flag flag;
+    std::call_once(flag, [](){
+        if(wirehair_init() != Wirehair_Success) {
+            throw std::runtime_error("Failed to initialize Wirehair library");
+        }
+    });
+}
 
 class FountainEncoder {
 public:
     FountainEncoder(const std::vector<uint8_t>& data, uint8_t encode_id = 0)
         : data_(data), encode_id_(encode_id), block_cnt_(0) {
         
-            wirehair_init();
+            wirehair_init_once();
 
         codec_ = wirehair_encoder_create(
             nullptr, data_.data(), data_.size(), Config::FOUNTAIN_CHUNK_SIZE);
@@ -78,12 +88,16 @@ private:
 class FountainDecoder {
 public:
     FountainDecoder()
-        : codec_(nullptr), file_size_(0), init_(false) {
+        : codec_(nullptr), file_size_(0), init_(false), is_complete_(false) {
             wirehair_init();
     }
     ~FountainDecoder(){
         if(codec_) wirehair_free(codec_);
     }
+
+    // 禁止拷贝
+    FountainDecoder(const FountainDecoder&) = delete;
+    FountainDecoder& operator = (const FountainDecoder&) = delete;
 
     // 添加新接收的数据块，返回是否成功
     bool add_block(const DataPacket& packet){
