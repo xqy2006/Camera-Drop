@@ -54,13 +54,10 @@ private:
 
 class ZstdDecompressor {
 public:
-    struct Result {
-        std::vector<uint8_t> data;
-        std::string filename;
-    };
-
-    Result decompress(const uint8_t* compressed, size_t compressed_size){
-        Result result;
+    
+    // (data, filename)
+    std::pair<std::vector<uint8_t>, std::string> decompress(const uint8_t* compressed, size_t compressed_size){
+        std::pair<std::vector<uint8_t>, std::string> result;
         size_t offset = 0;
         if(compressed_size >= 8){
             uint32_t magic;
@@ -69,7 +66,7 @@ public:
                 uint32_t frame_size;
                 memcpy(&frame_size, compressed + 4, 4);
                 if (8 + frame_size <= compressed_size){
-                    result.filename = std::string(
+                    result.second = std::string(
                         reinterpret_cast<const char*>(compressed + 8),
                         frame_size
                     );
@@ -88,14 +85,14 @@ public:
             return result;
         }
 
-        result.data.resize(decompressed_size);
+        result.first.resize(decompressed_size);
         size_t actual_size = ZSTD_decompress(
-            result.data.data(), decompressed_size,
+            result.first.data(), decompressed_size,
             compressed + offset, compressed_size - offset
         );
 
         if(ZSTD_isError(actual_size)){
-            result.data.clear();
+            result.first.clear();
         }
 
         return result;
