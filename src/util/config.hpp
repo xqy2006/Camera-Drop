@@ -23,5 +23,7 @@ public:
     
     static constexpr float PRESET_LOSS_RATE = 0.25f; // 丢包率浅浅设为 25%
     static constexpr float REDUNDANCY_FACTOR = 1.5f; // 冗余系数
+
+    static const int COMPRESSION_LEVEL = 9; // Zstd 压缩等级
 };
 

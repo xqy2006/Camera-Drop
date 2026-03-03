@@ -1,9 +1,6 @@
-// Author: Coast23
-// Date: 2026-02-27
-/*
-基于 Zstd 的打包与解包函数
-*/
 #pragma once
+
+#include "util/config.hpp"
 
 #include <zstd.h>
 #include <memory>
@@ -12,6 +9,100 @@
 #include <cstdint>
 #include <stdexcept>
 
+class ZstdCompressor {
+public:
+    ZstdCompressor(int compression_level = Config::COMPRESSION_LEVEL)
+        : compression_level_(compression_level) {}
+
+    // 压缩数据，文件名会添加到 skippable frame
+    std::vector<uint8_t> compress(const uint8_t* data, size_t size, const std::string& filename = ""){
+        std::vector<uint8_t> result;
+        
+        if(!filename.empty()) write_skippable_frame(result, filename);
+        
+        size_t bound = ZSTD_compressBound(size);
+        std::vector<uint8_t> compressed(bound);
+        
+        size_t compressed_size = ZSTD_compress(
+            compressed.data(),
+            bound,
+            data,
+            size,
+            compression_level_
+        );
+
+        if(ZSTD_isError(compressed_size)) return {};
+        
+        result.insert(result.end(), compressed.data(), compressed.data() + compressed_size);
+        return result;
+    }
+
+private:
+    int compression_level_;
+
+    // 将 skippable frame 内容打包进 output
+    void write_skippable_frame(std::vector<uint8_t>& output, const std::string& filename){
+        const uint32_t magic = 0x184D2A50;
+        const uint32_t frame_size = filename.size();
+        
+        output.resize(8 + frame_size);
+        memcpy(output.data(), &magic, 4);
+        memcpy(output.data() + 4, &frame_size, 4);
+        memcpy(output.data() + 8, filename.data(), frame_size);
+    }
+};
+
+class ZstdDecompressor {
+public:
+    struct Result {
+        std::vector<uint8_t> data;
+        std::string filename;
+    };
+
+    Result decompress(const uint8_t* compressed, size_t compressed_size){
+        Result result;
+        size_t offset = 0;
+        if(compressed_size >= 8){
+            uint32_t magic;
+            memcpy(&magic, compressed, 4);
+            if ((magic & 0xFFFFFFF0) == 0x184D2A50){
+                uint32_t frame_size;
+                memcpy(&frame_size, compressed + 4, 4);
+                if (8 + frame_size <= compressed_size){
+                    result.filename = std::string(
+                        reinterpret_cast<const char*>(compressed + 8),
+                        frame_size
+                    );
+                    offset = 8 + frame_size;
+                }
+            }
+        }
+
+        unsigned long long decompressed_size = ZSTD_getFrameContentSize(
+            compressed + offset,
+            compressed_size - offset
+        );
+
+        if(decompressed_size == ZSTD_CONTENTSIZE_ERROR || decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN){
+            // throw an exception?
+            return result;
+        }
+
+        result.data.resize(decompressed_size);
+        size_t actual_size = ZSTD_decompress(
+            result.data.data(), decompressed_size,
+            compressed + offset, compressed_size - offset
+        );
+
+        if(ZSTD_isError(actual_size)){
+            result.data.clear();
+        }
+
+        return result;
+    }
+};
+
+/*
 namespace ZstdPack {
 
     // 压缩
@@ -101,4 +192,4 @@ namespace ZstdPack {
         src = _decompress(comp_data);
         return true;
     }
-};
+};*/
