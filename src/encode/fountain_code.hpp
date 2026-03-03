@@ -1,0 +1,138 @@
+#pragma once
+
+#include "util/config.hpp"
+#include "util/DataPacket.hpp"
+extern "C" {
+    #include <wirehair/wirehair.h>
+}
+
+#include <vector>
+#include <memory>
+#include <unordered_map>
+
+class FountainEncoder {
+public:
+    FountainEncoder(const std::vector<uint8_t>& data, uint8_t encode_id = 0)
+        : data_(data), encode_id_(encode_id), block_cnt_(0) {
+        
+            wirehair_init();
+
+        codec_ = wirehair_encoder_create(
+            nullptr, data_.data(), data_.size(), Config::FOUNTAIN_CHUNK_SIZE);
+    }
+    ~FountainEncoder(){
+        if(codec_) wirehair_free(codec_);
+    }
+
+    bool is_valid() const {
+        return codec_ != nullptr;
+    }
+
+    // 编码一个块
+    DataPacket encode_block(){
+        DataPacket packet;
+        FountainMetadata meta;
+        meta.file_size = data_.size();
+        meta.block_id = block_cnt_++;
+        meta.encode_id = encode_id_;
+        packet.set_metadata(meta);
+        std::vector<uint8_t> chunk(Config::FOUNTAIN_CHUNK_SIZE);
+        uint32_t written = 0;
+
+        WirehairResult result = wirehair_encode(
+            codec_,
+            meta.block_id,
+            chunk.data(),
+            Config::FOUNTAIN_CHUNK_SIZE,
+            &written
+        );
+
+        if(result != Wirehair_Success){
+            // TODO: Throw exception?
+            chunk.clear();
+        }
+
+        else chunk.resize(written);
+
+        packet.set_data(chunk);
+        return packet;
+    }
+
+    // 计算需要的最少块数
+    uint32_t blocks_required() const {
+        return (data_.size() + Config::FOUNTAIN_CHUNK_SIZE - 1) / Config::FOUNTAIN_CHUNK_SIZE;
+    }
+
+    // 丢包率下的建议块数
+    uint32_t blocks_recommended() const {
+        return static_cast<uint32_t>(blocks_required() * Config::REDUNDANCY_FACTOR);
+    }
+
+private:
+    std::vector<uint8_t> data_;
+    uint8_t encode_id_;
+    uint32_t block_cnt_;
+    WirehairCodec codec_;
+};
+
+class FountainDecoder {
+public:
+    FountainDecoder()
+        : codec_(nullptr), file_size_(0), init_(false) {
+            wirehair_init();
+    }
+    ~FountainDecoder(){
+        if(codec_) wirehair_free(codec_);
+    }
+
+    // 添加新接收的数据块，返回是否成功
+    bool add_block(const DataPacket& packet){
+        const FountainMetadata& meta = packet.metadata();
+        if(!init_){
+            file_size_ = meta.file_size;
+            codec_ = wirehair_decoder_create(
+                nullptr, file_size_, Config::FOUNTAIN_CHUNK_SIZE);
+            if(!codec_) return false; // Oops!
+            init_ = true;
+        }
+
+        if(meta.file_size != file_size_) return false; // Oops!
+    
+        WirehairResult result = wirehair_decode(
+            codec_,
+            meta.block_id,
+            packet.data().data(),
+            packet.data().size()
+        );
+        
+        if(result == Wirehair_Success) is_complete_ = true;
+
+        return result == Wirehair_Success || result == Wirehair_NeedMore;
+    }
+
+    // 判断是否已经接收到足够的块并完成解码
+    bool is_complete() const {
+        return is_complete_;
+    }
+
+    // 获取解码后的数据
+    std::vector<uint8_t> decode() const {
+        if(!is_complete() || file_size_ == 0) return {};
+
+        std::vector<uint8_t> recovered(file_size_);
+        WirehairResult result = wirehair_recover(
+            codec_,
+            recovered.data(),
+            file_size_
+        );
+
+        if(result != Wirehair_Success) return {}; // TODO: Throw an exception?
+        return recovered;
+    }
+
+private:
+    WirehairCodec codec_;
+    uint32_t file_size_;
+    bool init_;
+    bool is_complete_;
+};
