@@ -1,355 +1,290 @@
+// anchor_scanner.cpp
+// Camera-Drop-old 定位 + 透视矫正（ORT + Canny 版）
+//
+// 模型：YOLO26，ONNX（post-NMS）
+// output0: [1, 300, 38]  每行 = [x1,y1,x2,y2, score, cls_id, mask_coeff×32]（letterbox坐标）
+//
+// 类别（nc=5）：
+//   0: camera_drop_frame
+//   1: qr_code
+//   2: anchor       ← TL/TR/BL 三个普通锚点（白黑白黑同心环）
+//   3: anchor_br    ← BR 锚点（四象限彩色同心环）
+//   4: qr_finder
+//
+// 角点确定策略：
+//   1. 全图推理，找置信度最高的 frame（cls=0）
+//   2. 裁 frame+35% 区域精检，在 frame+5% 内筛出 3×anchor + 1×anchor_br
+//   3. 对每个 anchor bbox 区域做 Canny 边缘检测 → minAreaRect → 取离 frame 中心最远的角
+//   4. BR-based 角色分配 → warpPerspective
+//
+// 用法：anchor_scanner <图像> <best.onnx>
+
+#include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 // ─────────────────────────────────────────────────────────────────
-// Anchor：一个检测到的定位块的像素范围
+// 常量
 // ─────────────────────────────────────────────────────────────────
-struct Anchor {
-    int x, xmax, y, ymax;
+static const int   YOLO_INPUT  = 640;
+static const int   FEAT_DIM    = 38;   // 4+1+1+32（post-NMS seg，只用前 6 列）
+static const float CONF_THRESH = 0.35f;
 
-    Anchor(int x_, int xmax_, int y_, int ymax_)
-        : x(x_), xmax(xmax_), y(y_), ymax(ymax_) {}
+static const int CLS_FRAME     = 0;
+static const int CLS_ANCHOR    = 2;
+static const int CLS_ANCHOR_BR = 3;
 
-    int xavg() const { return (x + xmax) / 2; }
-    int yavg() const { return (y + ymax) / 2; }
-    long long area() const { return (long long)std::abs(x - xmax) * std::abs(y - ymax); }
-    cv::Point2f center() const { return {(float)xavg(), (float)yavg()}; }
+// ─────────────────────────────────────────────────────────────────
+// Detection
+// ─────────────────────────────────────────────────────────────────
+struct Detection {
+    cv::Rect2f box;   // x1,y1,w,h（原图坐标）
+    float      score;
+    int        cls;
 };
 
 // ─────────────────────────────────────────────────────────────────
-// Corners：四个外角点（用于透视矫正）
+// Letterbox
 // ─────────────────────────────────────────────────────────────────
-struct Corners {
-    cv::Point2f tl, tr, bl, br;
+struct LetterboxInfo {
+    float scale;
+    int   pad_x, pad_y;
+    int   orig_w, orig_h;
 };
 
-// ── 工具：计算 bbox 四角中离指定重心最远的角 ──
-static cv::Point2f outer_corner_from_centroid(const Anchor& a, float gcx, float gcy) {
-    cv::Point2f corners[4] = {
-        {(float)a.x,    (float)a.y},
-        {(float)a.xmax, (float)a.y},
-        {(float)a.x,    (float)a.ymax},
-        {(float)a.xmax, (float)a.ymax}
-    };
-    cv::Point2f best = corners[0];
-    float bestD = -1;
-    for (int i = 0; i < 4; ++i) {
-        float dx = corners[i].x - gcx;
-        float dy = corners[i].y - gcy;
-        float d = dx*dx + dy*dy;
-        if (d > bestD) { bestD = d; best = corners[i]; }
+static cv::Mat letterbox(const cv::Mat& img, LetterboxInfo& info) {
+    int ow = img.cols, oh = img.rows;
+    float scale = std::min((float)YOLO_INPUT / ow, (float)YOLO_INPUT / oh);
+    int nw = (int)(ow * scale), nh = (int)(oh * scale);
+    int px = (YOLO_INPUT - nw) / 2, py = (YOLO_INPUT - nh) / 2;
+    info = { scale, px, py, ow, oh };
+
+    cv::Mat canvas(YOLO_INPUT, YOLO_INPUT, CV_8UC3, cv::Scalar(114, 114, 114));
+    cv::Mat resized;
+    cv::resize(img, resized, {nw, nh});
+    resized.copyTo(canvas(cv::Rect(px, py, nw, nh)));
+    return canvas;
+}
+
+static cv::Point2f lb_to_orig(float lx, float ly, const LetterboxInfo& lb) {
+    float x = std::max(0.f, std::min((float)lb.orig_w, (lx - lb.pad_x) / lb.scale));
+    float y = std::max(0.f, std::min((float)lb.orig_h, (ly - lb.pad_y) / lb.scale));
+    return {x, y};
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 解析 output0 post-NMS
+// ─────────────────────────────────────────────────────────────────
+static std::vector<Detection> parse_output(
+    const float* data, int n_dets,
+    const LetterboxInfo& lb, float conf_thresh)
+{
+    std::vector<Detection> dets;
+    for (int i = 0; i < n_dets; ++i) {
+        const float* row = data + i * FEAT_DIM;
+        float score = row[4];
+        int   cls   = (int)row[5];
+        if (score < conf_thresh) continue;
+        if (cls != CLS_FRAME && cls != CLS_ANCHOR && cls != CLS_ANCHOR_BR) continue;
+
+        cv::Point2f p1 = lb_to_orig(row[0], row[1], lb);
+        cv::Point2f p2 = lb_to_orig(row[2], row[3], lb);
+        dets.push_back({ {p1.x, p1.y, p2.x-p1.x, p2.y-p1.y}, score, cls });
+    }
+    return dets;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ORT 推理（只用 output0，不请求 proto mask）
+// ─────────────────────────────────────────────────────────────────
+static std::vector<Detection> run_inference(
+    Ort::Session& session, const cv::Mat& img, float conf_thresh)
+{
+    LetterboxInfo lb;
+    cv::Mat canvas = letterbox(img, lb);
+
+    cv::Mat rgb;
+    cv::cvtColor(canvas, rgb, cv::COLOR_BGR2RGB);
+    rgb.convertTo(rgb, CV_32F, 1.0 / 255.0);
+    std::vector<float> input_data(1 * 3 * YOLO_INPUT * YOLO_INPUT);
+    std::vector<cv::Mat> planes(3);
+    cv::split(rgb, planes);
+    for (int c = 0; c < 3; ++c)
+        memcpy(input_data.data() + c * YOLO_INPUT * YOLO_INPUT,
+               planes[c].ptr<float>(), YOLO_INPUT * YOLO_INPUT * sizeof(float));
+
+    std::vector<int64_t> input_shape = {1, 3, YOLO_INPUT, YOLO_INPUT};
+    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        mem_info, input_data.data(), input_data.size(),
+        input_shape.data(), input_shape.size());
+
+    const char* input_names[]  = {"images"};
+    const char* output_names[] = {"output0"};
+    auto outputs = session.Run(Ort::RunOptions{nullptr},
+                               input_names, &input_tensor, 1,
+                               output_names, 1);
+
+    auto shape0 = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+    int n_dets  = (int)shape0[1];
+    const float* data0 = outputs[0].GetTensorData<float>();
+
+    return parse_output(data0, n_dets, lb, conf_thresh);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 对 anchor bbox 区域做 Canny 边缘检测，获取旋转矩形的 4 个角点
+// ─────────────────────────────────────────────────────────────────
+static std::vector<cv::Point2f> find_anchor_corners_image(
+    const cv::Mat& img, const cv::Rect2f& bbox)
+{
+    const int margin = 4;
+    int x1 = std::max(0,        (int)(bbox.x) - margin);
+    int y1 = std::max(0,        (int)(bbox.y) - margin);
+    int x2 = std::min(img.cols, (int)(bbox.x + bbox.width)  + margin);
+    int y2 = std::min(img.rows, (int)(bbox.y + bbox.height) + margin);
+    if (x2 <= x1 || y2 <= y1) return {};
+
+    cv::Mat crop = img(cv::Rect(x1, y1, x2-x1, y2-y1));
+    cv::Mat gray, blur, edges;
+    cv::cvtColor(crop, gray, cv::COLOR_BGR2GRAY);
+    cv::GaussianBlur(gray, blur, {3, 3}, 0);
+    cv::Canny(blur, edges, 30, 100);
+
+    std::vector<cv::Point> pts;
+    for (int r = 0; r < edges.rows; r++)
+        for (int c = 0; c < edges.cols; c++)
+            if (edges.at<uchar>(r, c) > 0)
+                pts.push_back({c, r});
+
+    if ((int)pts.size() < 10) return {};
+
+    cv::RotatedRect rr = cv::minAreaRect(pts);
+    cv::Point2f corners[4];
+    rr.points(corners);
+
+    std::vector<cv::Point2f> result;
+    for (int i = 0; i < 4; i++)
+        result.push_back({corners[i].x + x1, corners[i].y + y1});
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 取 anchor 离 frame 中心最远的角点（Canny 分析，退化用 bbox 角）
+// ─────────────────────────────────────────────────────────────────
+static cv::Point2f outer_corner(const Detection& d, const cv::Mat& img,
+                                float fc_x, float fc_y)
+{
+    auto pts = find_anchor_corners_image(img, d.box);
+    if (pts.empty()) {
+        pts = {
+            {d.box.x,               d.box.y},
+            {d.box.x + d.box.width,  d.box.y},
+            {d.box.x,               d.box.y + d.box.height},
+            {d.box.x + d.box.width,  d.box.y + d.box.height}
+        };
+    }
+    cv::Point2f best = pts[0]; float bestD = -1;
+    for (const auto& p : pts) {
+        float dd = (p.x - fc_x)*(p.x - fc_x) + (p.y - fc_y)*(p.y - fc_y);
+        if (dd > bestD) { bestD = dd; best = p; }
     }
     return best;
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 透视矫正：将识别到的 4 个角点变换到 out_size × out_size 的标准图像
+// 角色分配 + 透视矫正
 // ─────────────────────────────────────────────────────────────────
-cv::Mat deskew(const cv::Mat& img, const Corners& corners, int out_size = 1024) {
-    std::vector<cv::Point2f> src = {corners.tl, corners.tr, corners.bl, corners.br};
-    float s = (float)out_size;
-    std::vector<cv::Point2f> dst = {{0,0}, {s,0}, {0,s}, {s,s}};
-    cv::Mat M = cv::getPerspectiveTransform(src, dst);
-    cv::Mat result;
-    cv::warpPerspective(img, result, M, {out_size, out_size});
-    return result;
-}
-
-// ─────────────────────────────────────────────────────────────────
-// FrameDetector：用 YOLOv8 ONNX 模型定位目标
-//
-// 支持任意类别数 nc（nc = num_features - 4）
-// 输出张量格式（自动检测）：
-//   [1, 4+nc, 8400]  特征优先
-//   [1, 8400, 4+nc]  框优先（onnxsim 后常见）
-// ─────────────────────────────────────────────────────────────────
-struct Detection {
-    cv::Rect rect;
-    int      class_id;
-    float    score;
-};
-
-class FrameDetector {
-public:
-    FrameDetector(const std::string& model_path,
-                  float conf_thresh = 0.4f,
-                  float nms_thresh  = 0.45f)
-        : _conf(conf_thresh), _nms(nms_thresh)
-    {
-        _net = cv::dnn::readNetFromONNX(model_path);
-        if (_net.empty())
-            throw std::runtime_error("无法加载 ONNX 模型: " + model_path);
-        _net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-        _net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-    }
-
-    // 返回检测结果（原图坐标），按置信度降序
-    // only_class: 若>=0，仅保留该类别（加速粗定位阶段的后处理）
-    std::vector<Detection> detect(const cv::Mat& img, int only_class = -1) {
-        const int inp = 640;
-        int ow = img.cols, oh = img.rows;
-
-        // 1. Letterbox resize
-        float scale = std::min((float)inp / ow, (float)inp / oh);
-        int nw = (int)(ow * scale), nh = (int)(oh * scale);
-        int px = (inp - nw) / 2,    py = (inp - nh) / 2;
-
-        cv::Mat canvas(inp, inp, CV_8UC3, cv::Scalar(114, 114, 114));
-        cv::Mat resized;
-        cv::resize(img, resized, {nw, nh});
-        resized.copyTo(canvas(cv::Rect(px, py, nw, nh)));
-
-        // 2. BGR→RGB, 归一化, NCHW
-        cv::Mat blob = cv::dnn::blobFromImage(
-            canvas, 1.0 / 255.0, {inp, inp}, cv::Scalar(), true, false, CV_32F);
-        _net.setInput(blob);
-
-        // 3. 推理（只取 output0）
-        std::vector<cv::Mat> outs;
-        _net.forward(outs, std::vector<cv::String>{"output0"});
-
-        if (outs.empty()) { printf("[YOLO] 推理无输出\n"); return {}; }
-
-        // 4. 自动检测布局，确定 num_boxes / num_features
-        const cv::Mat& raw = outs[0];
-        printf("[YOLO] tensor dims=%d", raw.dims);
-        for (int d = 0; d < raw.dims; ++d) printf(" [%d]=%d", d, raw.size[d]);
-        printf("\n");
-
-        int num_boxes = 0, num_feat = 0;
-        bool row_major = false;
-
-        if (raw.dims == 3) {
-            int d1 = raw.size[1], d2 = raw.size[2];
-            if (d1 < d2) { num_feat=d1; num_boxes=d2; row_major=false; }
-            else          { num_feat=d2; num_boxes=d1; row_major=true;  }
-        } else if (raw.dims == 2) {
-            int d0 = raw.size[0], d1 = raw.size[1];
-            if (d0 < d1) { num_feat=d0; num_boxes=d1; row_major=false; }
-            else          { num_feat=d1; num_boxes=d0; row_major=true;  }
-        } else {
-            printf("[YOLO] 未知 tensor 形状\n");
-            return {};
-        }
-
-        int nc = num_feat - 4;
-        if (nc < 1) { printf("[YOLO] 特征维度异常 num_feat=%d\n", num_feat); return {}; }
-        printf("[YOLO] num_boxes=%d  nc=%d  row_major=%d\n", num_boxes, nc, (int)row_major);
-
-        const float* data = raw.ptr<float>();
-
-        auto get_feat = [&](int box_i, int feat_i) -> float {
-            return row_major ? data[box_i * num_feat + feat_i]
-                             : data[feat_i * num_boxes + box_i];
-        };
-
-        // 5. 解析每个框
-        float max_score = 0.f;
-        std::vector<cv::Rect>  boxes;
-        std::vector<float>     scores;
-        std::vector<int>       class_ids;
-
-        for (int i = 0; i < num_boxes; ++i) {
-            float best_score = -1.f;
-            int   best_cls   = 0;
-            for (int c = 0; c < nc; ++c) {
-                if (only_class >= 0 && c != only_class) continue;
-                float s = get_feat(i, 4 + c);
-                if (s > best_score) { best_score = s; best_cls = c; }
-            }
-            if (best_score > max_score) max_score = best_score;
-            if (best_score < _conf) continue;
-
-            float cx = get_feat(i, 0);
-            float cy = get_feat(i, 1);
-            float w  = get_feat(i, 2);
-            float h  = get_feat(i, 3);
-
-            float x1 = std::max(0.f, (cx - w/2.f - px) / scale);
-            float y1 = std::max(0.f, (cy - h/2.f - py) / scale);
-            float x2 = std::min((float)ow, (cx + w/2.f - px) / scale);
-            float y2 = std::min((float)oh, (cy + h/2.f - py) / scale);
-
-            boxes.push_back({(int)x1, (int)y1, (int)(x2-x1), (int)(y2-y1)});
-            scores.push_back(best_score);
-            class_ids.push_back(best_cls);
-        }
-
-        printf("[YOLO] max_score=%.4f  threshold=%.2f  candidates=%zu\n",
-               max_score, _conf, boxes.size());
-
-        // 6. NMS（按类别分别做）
-        std::vector<Detection> result;
-        for (int cls = 0; cls < nc; ++cls) {
-            std::vector<cv::Rect>  cls_boxes;
-            std::vector<float>     cls_scores;
-            for (int i = 0; i < (int)boxes.size(); ++i) {
-                if (class_ids[i] == cls) {
-                    cls_boxes.push_back(boxes[i]);
-                    cls_scores.push_back(scores[i]);
-                }
-            }
-            std::vector<int> idx;
-            cv::dnn::NMSBoxes(cls_boxes, cls_scores, _conf, _nms, idx);
-            for (int i : idx) {
-                Detection d;
-                d.rect     = cls_boxes[i];
-                d.class_id = cls;
-                d.score    = cls_scores[i];
-                result.push_back(d);
-            }
-        }
-
-        std::sort(result.begin(), result.end(),
-                  [](const Detection& a, const Detection& b){ return a.score > b.score; });
-        return result;
-    }
-
-private:
-    cv::dnn::Net _net;
-    float _conf, _nms;
-};
-
-// ─────────────────────────────────────────────────────────────────
-// 角色分配 + 外角选取 + 透视矫正
-// ─────────────────────────────────────────────────────────────────
-static void finish_deskew(cv::Mat& vis, cv::Mat& img,
-                           std::vector<Anchor>& anchors,
-                           std::vector<Anchor>& normal_anchors,
-                           const std::vector<Detection>& br_dets,
+static void finish_deskew(cv::Mat& vis, const cv::Mat& img,
+                           const std::vector<Detection>& normal_dets,
+                           const Detection& br_det,
+                           const cv::Rect2f& frame_rect,
                            const std::string& prefix)
 {
     using namespace cv;
-    printf("\n检测到 %zu 个定位块：\n", anchors.size());
-    for (int i = 0; i < (int)anchors.size(); ++i) {
-        auto& a = anchors[i];
-        printf("  [%d] 中心(%d,%d)  x[%d,%d]  y[%d,%d]  面积=%lld\n",
-               i, a.xavg(), a.yavg(), a.x, a.xmax, a.y, a.ymax, a.area());
-    }
 
-    for (int i = 0; i < (int)anchors.size(); ++i) {
-        auto& a = anchors[i];
-        Scalar col = Scalar(0, 128, 255);
-        rectangle(vis, Point(a.x, a.y), Point(a.xmax, a.ymax), col, 2);
-        circle(vis, Point(a.xavg(), a.yavg()), 5, col, -1);
-        char lbl[8]; snprintf(lbl, sizeof(lbl), "%d", i);
-        putText(vis, lbl, Point(a.xavg()+6, a.yavg()-6),
-                FONT_HERSHEY_SIMPLEX, 0.5, col, 1);
-    }
+    float fc_x = frame_rect.x + frame_rect.width  / 2.0f;
+    float fc_y = frame_rect.y + frame_rect.height / 2.0f;
 
-    // ── BR-based cross-product role assignment ──────────────────
-    const Detection& br_det = br_dets[0];
-    Anchor brA(br_det.rect.x, br_det.rect.x + br_det.rect.width,
-               br_det.rect.y, br_det.rect.y + br_det.rect.height);
-    float br_cx = (float)brA.xavg(), br_cy = (float)brA.yavg();
+    float br_cx = br_det.box.x + br_det.box.width  / 2.0f;
+    float br_cy = br_det.box.y + br_det.box.height / 2.0f;
 
-    // TL = normal anchor 中离 BR 最远的
-    int tl_idx = 0;
-    float max_dist = -1;
-    for (int i = 0; i < (int)normal_anchors.size(); ++i) {
-        float dx = (float)normal_anchors[i].xavg() - br_cx;
-        float dy = (float)normal_anchors[i].yavg() - br_cy;
-        float d = dx*dx + dy*dy;
+    // TL = normal anchors 中离 BR 最远
+    int tl_idx = 0; float max_dist = -1;
+    for (int i = 0; i < (int)normal_dets.size(); ++i) {
+        float dx = normal_dets[i].box.x + normal_dets[i].box.width/2.f  - br_cx;
+        float dy = normal_dets[i].box.y + normal_dets[i].box.height/2.f - br_cy;
+        float d  = dx*dx + dy*dy;
         if (d > max_dist) { max_dist = d; tl_idx = i; }
     }
-    Anchor tlA = normal_anchors[tl_idx];
-    float tl_cx = (float)tlA.xavg(), tl_cy = (float)tlA.yavg();
+    float tl_cx = normal_dets[tl_idx].box.x + normal_dets[tl_idx].box.width/2.f;
+    float tl_cy = normal_dets[tl_idx].box.y + normal_dets[tl_idx].box.height/2.f;
 
-    // 剩余 normals
-    std::vector<Anchor> rem;
-    for (int i = 0; i < (int)normal_anchors.size(); ++i) {
-        if (i != tl_idx) rem.push_back(normal_anchors[i]);
-    }
+    std::vector<int> rem;
+    for (int i = 0; i < (int)normal_dets.size(); ++i) if (i != tl_idx) rem.push_back(i);
+    if (rem.size() < 2) { printf("TR/BL 不足，跳过 deskew\n"); return; }
 
-    // TL→BR 向量，叉积区分 TR/BL
-    float vx = br_cx - tl_cx, vy = br_cy - tl_cy;
+    float vx  = br_cx - tl_cx, vy = br_cy - tl_cy;
+    float rx0 = normal_dets[rem[0]].box.x + normal_dets[rem[0]].box.width/2.f;
+    float ry0 = normal_dets[rem[0]].box.y + normal_dets[rem[0]].box.height/2.f;
+    float cross = vx*(ry0 - tl_cy) - vy*(rx0 - tl_cx);
 
-    Anchor trA = rem[0], blA = rem[0];
-    bool has_tr = false, has_bl = false;
+    int tr_idx = (cross < 0) ? rem[0] : rem[1];
+    int bl_idx = (cross < 0) ? rem[1] : rem[0];
 
-    if (rem.size() >= 2) {
-        float cross0 = vx * ((float)rem[0].yavg() - tl_cy) - vy * ((float)rem[0].xavg() - tl_cx);
-        if (cross0 < 0) {
-            trA = rem[0]; blA = rem[1];
-        } else {
-            trA = rem[1]; blA = rem[0];
-        }
-        has_tr = true; has_bl = true;
-    } else if (rem.size() == 1) {
-        float cross0 = vx * ((float)rem[0].yavg() - tl_cy) - vy * ((float)rem[0].xavg() - tl_cx);
-        if (cross0 < 0) { trA = rem[0]; has_tr = true; }
-        else            { blA = rem[0]; has_bl = true; }
-    }
+    printf("角色分配 [BR-based]:\n");
+    printf("  BR=(%.0f,%.0f)  TL=(%.0f,%.0f)  TR=(%.0f,%.0f)  BL=(%.0f,%.0f)\n",
+           br_cx, br_cy, tl_cx, tl_cy,
+           normal_dets[tr_idx].box.x + normal_dets[tr_idx].box.width/2.f,
+           normal_dets[tr_idx].box.y + normal_dets[tr_idx].box.height/2.f,
+           normal_dets[bl_idx].box.x + normal_dets[bl_idx].box.width/2.f,
+           normal_dets[bl_idx].box.y + normal_dets[bl_idx].box.height/2.f);
 
-    if (!has_tr || !has_bl) {
-        printf("TR 或 BL 不足，跳过 deskew。\n");
-        return;
-    }
+    // 每个 anchor 用 Canny 分析取外角
+    Point2f TL = outer_corner(normal_dets[tl_idx], img, fc_x, fc_y);
+    Point2f TR = outer_corner(normal_dets[tr_idx], img, fc_x, fc_y);
+    Point2f BL = outer_corner(normal_dets[bl_idx], img, fc_x, fc_y);
+    Point2f BR = outer_corner(br_det,              img, fc_x, fc_y);
 
-    printf("角色分配 [BR-based cross-product]:\n");
-    printf("  BR center=(%d,%d)\n", brA.xavg(), brA.yavg());
-    printf("  TL center=(%d,%d)\n", tlA.xavg(), tlA.yavg());
-    printf("  TR center=(%d,%d)\n", trA.xavg(), trA.yavg());
-    printf("  BL center=(%d,%d)\n", blA.xavg(), blA.yavg());
+    printf("角点（Canny outer corner）：\n");
+    printf("  TL=(%.1f,%.1f)  TR=(%.1f,%.1f)\n", TL.x, TL.y, TR.x, TR.y);
+    printf("  BL=(%.1f,%.1f)  BR=(%.1f,%.1f)\n", BL.x, BL.y, BR.x, BR.y);
 
-    // ── 外角选取：离四锚点重心最远的 bbox 角 ─────────────────────
-    float gcx = ((float)tlA.xavg() + (float)trA.xavg() +
-                 (float)blA.xavg() + (float)brA.xavg()) / 4.0f;
-    float gcy = ((float)tlA.yavg() + (float)trA.yavg() +
-                 (float)blA.yavg() + (float)brA.yavg()) / 4.0f;
-    printf("  centroid=(%.1f, %.1f)\n", gcx, gcy);
-
-    Corners corners;
-    corners.tl = outer_corner_from_centroid(tlA, gcx, gcy);
-    corners.tr = outer_corner_from_centroid(trA, gcx, gcy);
-    corners.bl = outer_corner_from_centroid(blA, gcx, gcy);
-    corners.br = outer_corner_from_centroid(brA, gcx, gcy);
-
-    printf("\n角点（centroid outer corner）：\n");
-    printf("  TL = (%.1f, %.1f)\n", corners.tl.x, corners.tl.y);
-    printf("  TR = (%.1f, %.1f)\n", corners.tr.x, corners.tr.y);
-    printf("  BL = (%.1f, %.1f)\n", corners.bl.x, corners.bl.y);
-    printf("  BR = (%.1f, %.1f)\n", corners.br.x, corners.br.y);
-
-    auto mark = [&](cv::Point2f p, const char* label, Scalar color) {
-        circle(vis, p, 10, color, 2);
-        putText(vis, label, Point((int)p.x + 12, (int)p.y - 8),
-                FONT_HERSHEY_SIMPLEX, 0.7, color, 2);
+    auto mark = [&](Point2f p, const char* lbl, Scalar col) {
+        circle(vis, p, 10, col, 2);
+        putText(vis, lbl, Point((int)p.x + 12, (int)p.y - 8),
+                FONT_HERSHEY_SIMPLEX, 0.7, col, 2);
     };
-    mark(corners.tl, "TL", Scalar(255, 100, 0));
-    mark(corners.tr, "TR", Scalar(0, 255, 0));
-    mark(corners.bl, "BL", Scalar(0, 128, 255));
-    mark(corners.br, "BR", Scalar(0, 0, 255));
+    mark(TL, "TL", Scalar(255,100,0));
+    mark(TR, "TR", Scalar(0,255,0));
+    mark(BL, "BL", Scalar(0,128,255));
+    mark(BR, "BR", Scalar(0,0,255));
 
-    Mat corrected = deskew(img, corners, 1024);
+    const int OUT = 1024;
+    std::vector<Point2f> src = {TL, TR, BL, BR};
+    std::vector<Point2f> dst = {{0,0},{(float)OUT,0},{0,(float)OUT},{(float)OUT,(float)OUT}};
+    Mat M = getPerspectiveTransform(src, dst);
+    Mat corrected;
+    warpPerspective(img, corrected, M, {OUT, OUT});
     imwrite(prefix + "deskewed.png", corrected);
-    printf("透视矫正图像已保存为 %sdeskewed.png\n", prefix.c_str());
+    printf("[deskew] 透视矫正图像已保存\n");
 }
 
 // ─────────────────────────────────────────────────────────────────
 // main
-// 用法：anchor_scanner image.jpg combined_fixed640.onnx
-//
-// combined.onnx 类别：
-//   0: camera_drop_frame   1: qr_code
-//   2: anchor(TL/TR/BL)    3: anchor_br
-//   4: qr_finder           5: hanzi_hui
 // ─────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
-    using namespace cv;
-
     if (argc < 3) {
-        fprintf(stderr, "用法：anchor_scanner <图像> <combined_fixed640.onnx>\n");
+        fprintf(stderr, "用法：anchor_scanner <图像> <best.onnx>\n");
         return 1;
     }
-
     std::string input_path = argv[1];
     std::string model_path = argv[2];
 
-    // 输出文件前缀：去掉目录和扩展名，如 "../1.jpg" → "1_"
     std::string prefix;
     {
         std::string base = input_path;
@@ -360,145 +295,135 @@ int main(int argc, char** argv) {
         prefix = base + "_";
     }
 
-    Mat img = imread(input_path);
-    if (img.empty()) {
-        fprintf(stderr, "错误：无法读取图像 '%s'\n", input_path.c_str());
-        return 1;
-    }
+    cv::Mat img = cv::imread(input_path);
+    if (img.empty()) { fprintf(stderr, "错误：无法读取图像 '%s'\n", input_path.c_str()); return 1; }
     printf("读取图像：%s (%dx%d)\n", input_path.c_str(), img.cols, img.rows);
 
-    Mat vis = img.clone();
+    printf("加载模型：%s\n", model_path.c_str());
+    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "anchor_scanner");
+    Ort::SessionOptions opts;
+    opts.SetIntraOpNumThreads(4);
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    std::wstring wmodel(model_path.begin(), model_path.end());
+    Ort::Session session(env, wmodel.c_str(), opts);
 
-    // ── 两阶段推理─────────────────────
-    // Stage 1: 640×640 全图，只解析 frame (cls=0)
-    // Stage 2: 裁图 640×640 精检，所有类别
-    const float FRAME_PAD = 0.35f;
+    cv::Mat vis = img.clone();
 
-    printf("合并模型：%s\n", model_path.c_str());
-    FrameDetector det(model_path, 0.35f, 0.45f);
+    // ── Stage 1：全图推理，找 frame ──────────────────────────────
+    printf("[Stage1] 全图推理...\n");
+    auto dets1 = run_inference(session, img, CONF_THRESH);
+    printf("[Stage1] 检测到 %zu 个\n", dets1.size());
+    for (auto& d : dets1)
+        printf("  cls=%d score=%.3f box=(%.0f,%.0f,%.0f,%.0f)\n",
+               d.cls, d.score, d.box.x, d.box.y,
+               d.box.x + d.box.width, d.box.y + d.box.height);
 
-    // ── Stage 1 ──────────────────────────────────────────────────
-    printf("[Stage1] 640×640, only cls=0 (frame)\n");
-    auto dets1 = det.detect(img, 0);
-
-    // 找最高置信度的 frame
-    cv::Rect frame_rect;
-    bool has_frame = false;
+    cv::Rect2f frame_rect;
     float best_frame_score = 0.f;
+    bool has_frame = false;
     for (auto& d : dets1) {
-        if (d.class_id == 0 && d.score > best_frame_score) {
-            frame_rect = d.rect;
-            best_frame_score = d.score;
-            has_frame = true;
+        if (d.cls == CLS_FRAME && d.score > best_frame_score) {
+            frame_rect = d.box; best_frame_score = d.score; has_frame = true;
         }
     }
-
     if (!has_frame) {
-        printf("未检测到 Camera-Drop 帧（class 0）。\n");
-        imwrite(prefix + "detected.png", vis);
-        return 1;
+        printf("未检测到 frame（cls=0）\n");
+        cv::imwrite(prefix + "detected.png", vis); return 1;
     }
-    printf("[Stage1] 帧 bbox: x[%d,%d] y[%d,%d]  score=%.3f\n",
-           frame_rect.x, frame_rect.x + frame_rect.width,
-           frame_rect.y, frame_rect.y + frame_rect.height,
+    printf("[Stage1] frame bbox=(%.0f,%.0f,%.0f,%.0f) score=%.3f\n",
+           frame_rect.x, frame_rect.y,
+           frame_rect.x + frame_rect.width, frame_rect.y + frame_rect.height,
            best_frame_score);
 
-    rectangle(vis, frame_rect, Scalar(0, 255, 255), 2);
-    putText(vis, "frame", frame_rect.tl() + Point(4, 20),
-            FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0, 255, 255), 2);
+    cv::Rect fr_ri((int)frame_rect.x, (int)frame_rect.y,
+                   (int)frame_rect.width, (int)frame_rect.height);
+    cv::rectangle(vis, fr_ri, cv::Scalar(0,255,255), 2);
+    cv::putText(vis, "frame", fr_ri.tl() + cv::Point(4, 20),
+                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,255,255), 2);
 
-    // Frame score gate（与 web 版一致：< 0.75 跳过）
-    if (best_frame_score < 0.75f) {
-        printf("[Stage1] frame score %.3f < 0.75, 跳过 deskew\n", best_frame_score);
-        imwrite(prefix + "detected.png", vis);
-        return 0;
-    }
+    // ── Stage 2：裁图精检（frame ± 35%） ─────────────────────────
+    const float FRAME_PAD  = 0.35f;
+    const float ANCHOR_EXP = 0.05f;
 
-    // ── Stage 2：裁图精检 ────────────────────────────────────────
-    int fw = frame_rect.width, fh = frame_rect.height;
+    int fw = (int)frame_rect.width, fh = (int)frame_rect.height;
     int pad = (int)(std::max(fw, fh) * FRAME_PAD);
-    int cx1 = std::max(0, frame_rect.x - pad);
-    int cy1 = std::max(0, frame_rect.y - pad);
-    int cx2 = std::min(img.cols, frame_rect.x + fw + pad);
-    int cy2 = std::min(img.rows, frame_rect.y + fh + pad);
-    int cw = cx2 - cx1, ch = cy2 - cy1;
-    printf("[Stage2] crop=[%d,%d,%d,%d] %dx%d  pad=%d\n", cx1, cy1, cx2, cy2, cw, ch, pad);
+    int cx1 = std::max(0,        (int)frame_rect.x - pad);
+    int cy1 = std::max(0,        (int)frame_rect.y - pad);
+    int cx2 = std::min(img.cols, (int)(frame_rect.x + fw) + pad);
+    int cy2 = std::min(img.rows, (int)(frame_rect.y + fh) + pad);
+    printf("[Stage2] crop=[%d,%d,%d,%d]\n", cx1, cy1, cx2, cy2);
 
-    Mat crop = img(cv::Rect(cx1, cy1, cw, ch));
-    auto dets2_raw = det.detect(crop);
-    printf("[Stage2] 检测到 %zu 个候选框\n", dets2_raw.size());
+    cv::Mat crop = img(cv::Rect(cx1, cy1, cx2-cx1, cy2-cy1));
+    auto dets2_raw = run_inference(session, crop, CONF_THRESH);
+    printf("[Stage2] 检测到 %zu 个\n", dets2_raw.size());
 
-    // 坐标映射回原图空间
     std::vector<Detection> dets2;
     for (auto& d : dets2_raw) {
         Detection d2 = d;
-        d2.rect.x += cx1;
-        d2.rect.y += cy1;
+        d2.box.x += cx1;
+        d2.box.y += cy1;
         dets2.push_back(d2);
     }
 
-    // Fallback：Stage 2 没找到 frame → 用 Stage 1 frame + Stage 2 非 frame
     bool has_frame2 = false;
-    for (auto& d : dets2) {
-        if (d.class_id == 0) { has_frame2 = true; break; }
-    }
+    for (auto& d : dets2) if (d.cls == CLS_FRAME) { has_frame2 = true; break; }
 
     std::vector<Detection> all_dets;
     if (has_frame2) {
         all_dets = dets2;
     } else {
-        for (auto& d : dets1)
-            if (d.class_id == 0) all_dets.push_back(d);
-        for (auto& d : dets2)
-            if (d.class_id != 0) all_dets.push_back(d);
+        for (auto& d : dets1) if (d.cls == CLS_FRAME) all_dets.push_back(d);
+        for (auto& d : dets2) if (d.cls != CLS_FRAME) all_dets.push_back(d);
     }
 
-    // 重新找帧 rect
-    frame_rect = cv::Rect();
-    best_frame_score = 0.f;
+    frame_rect = cv::Rect2f(); best_frame_score = 0.f;
+    for (auto& d : all_dets)
+        if (d.cls == CLS_FRAME && d.score > best_frame_score)
+            { frame_rect = d.box; best_frame_score = d.score; }
+
+    // ── 锚点筛选（中心在 frame + 5% 内） ─────────────────────────
+    float ex  = frame_rect.width  * ANCHOR_EXP;
+    float ey  = frame_rect.height * ANCHOR_EXP;
+    float fx1 = frame_rect.x - ex,                     fy1 = frame_rect.y - ey;
+    float fx2 = frame_rect.x + frame_rect.width  + ex, fy2 = frame_rect.y + frame_rect.height + ey;
+
+    std::vector<Detection> normal_dets;
+    Detection best_br; bool has_br = false;
+
     for (auto& d : all_dets) {
-        if (d.class_id == 0 && d.score > best_frame_score) {
-            frame_rect = d.rect;
-            best_frame_score = d.score;
-        }
-    }
+        if (d.cls != CLS_ANCHOR && d.cls != CLS_ANCHOR_BR) continue;
+        float acx = d.box.x + d.box.width  / 2.f;
+        float acy = d.box.y + d.box.height / 2.f;
+        if (acx < fx1 || acx > fx2 || acy < fy1 || acy > fy2) continue;
 
-    // ── 严格锚点筛选：中心必须在 frame 内（零容差，与 web 一致）──
-    std::vector<Anchor> anchors, normal_anchors;
-    std::vector<Detection> br_dets;
+        cv::Scalar col = (d.cls == CLS_ANCHOR_BR) ? cv::Scalar(0,0,255) : cv::Scalar(0,128,255);
+        cv::Rect ri((int)d.box.x, (int)d.box.y, (int)d.box.width, (int)d.box.height);
+        cv::rectangle(vis, ri, col, 2);
 
-    for (auto& d : all_dets) {
-        if (d.class_id != 2 && d.class_id != 3) continue;
-        int acx = d.rect.x + d.rect.width  / 2;
-        int acy = d.rect.y + d.rect.height / 2;
-        if (acx < frame_rect.x || acx > frame_rect.x + frame_rect.width)  continue;
-        if (acy < frame_rect.y || acy > frame_rect.y + frame_rect.height) continue;
-
-        Anchor a(d.rect.x, d.rect.x + d.rect.width,
-                 d.rect.y, d.rect.y + d.rect.height);
-        anchors.push_back(a);
-        if (d.class_id == 3) {
-            br_dets.push_back(d);
-            printf("  [BR] center=(%d,%d)  score=%.3f\n", acx, acy, d.score);
+        if (d.cls == CLS_ANCHOR_BR) {
+            if (!has_br || d.score > best_br.score) { best_br = d; has_br = true; }
+            printf("  [BR]     center=(%.0f,%.0f) score=%.3f\n", acx, acy, d.score);
         } else {
-            normal_anchors.push_back(a);
+            normal_dets.push_back(d);
+            printf("  [anchor] center=(%.0f,%.0f) score=%.3f\n", acx, acy, d.score);
         }
     }
 
-    printf("筛选后: %zu anchors (%zu normal + %zu BR)\n",
-           anchors.size(), normal_anchors.size(), br_dets.size());
+    std::sort(normal_dets.begin(), normal_dets.end(),
+              [](const Detection& a, const Detection& b){ return a.score > b.score; });
+    if (normal_dets.size() > 3) normal_dets.resize(3);
 
-    // 严格要求：>= 1 BR + >= 3 normal
-    if (br_dets.size() < 1 || normal_anchors.size() < 3) {
-        printf("锚点不足，跳过 deskew。\n");
-        imwrite(prefix + "detected.png", vis);
-        return 0;
+    printf("筛选后: %zu normal + %s BR\n", normal_dets.size(), has_br ? "1" : "0");
+
+    if (!has_br || normal_dets.size() < 3) {
+        printf("锚点不足（需要 3 normal + 1 BR），跳过 deskew。\n");
+        cv::imwrite(prefix + "detected.png", vis); return 0;
     }
 
-    finish_deskew(vis, img, anchors, normal_anchors, br_dets, prefix);
+    finish_deskew(vis, img, normal_dets, best_br, frame_rect, prefix);
 
-    imwrite(prefix + "detected.png", vis);
-    printf("标注结果已保存为 %sdetected.png\n", prefix.c_str());
-
+    cv::imwrite(prefix + "detected.png", vis);
+    printf("\n输出文件：\n  %sdetected.png\n  %sdeskewed.png\n",
+           prefix.c_str(), prefix.c_str());
     return 0;
 }
