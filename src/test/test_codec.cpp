@@ -90,7 +90,7 @@ int main(){
 
     puts("Test Codec");
 
-    auto data = generate_data(1024 * 10); // 1 MB
+    auto data = generate_data(1024 * 100); // 100 KB
     
     const char* inFile = "in.bin";
     const char* outFile = "out.bin";
@@ -102,9 +102,9 @@ int main(){
     Encoder encoder(inFile);
     assert(encoder.is_valid());
 
-    VideoChannel channel;
+    VideoChannel channel(0.1, 0.06);
 
-    const uint32_t packet_count = encoder.packet_count_recommended() * 25;
+    const uint32_t packet_count = encoder.packet_count_recommended();
 
     for(uint32_t i = 0; i < packet_count; ++i){
         auto packet = encoder.get_packet();

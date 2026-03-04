@@ -14,7 +14,6 @@ public:
 
     bool process_packet(const std::vector<uint8_t>& packet_data){
         std::vector<uint8_t> decoded_data;
-        RSDecoder rs_decoder;
 
         size_t offset = 0;
         while(offset < packet_data.size()){
@@ -62,4 +61,5 @@ public:
 
 private:
     std::unique_ptr<FountainDecoder> fountain_decoder_;
+    RSDecoder rs_decoder;
 };
