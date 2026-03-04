@@ -25,7 +25,7 @@ endif()
 # OpenCV 请自备
 find_package(OpenCV REQUIRED)
 
-add_executable(debug src/test.cpp ${SRC_FILES})
+add_executable(debug src/test/test_codec.cpp ${SRC_FILES})
 
 target_include_directories(debug PRIVATE
     src
@@ -34,7 +34,7 @@ target_include_directories(debug PRIVATE
 
 target_link_libraries(debug PRIVATE
     wirehair
-    correct
+    correct_static
     libzstd_static
     ${OpenCV_LIBS}
 )
