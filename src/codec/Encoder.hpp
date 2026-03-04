@@ -11,7 +11,7 @@
 class Encoder {
 public:
     
-    Encoder(const std::string& filename, uint8_t encode_id = 0){
+    Encoder(const std::string& filename, uint8_t encode_id = 0) : encode_id_(encode_id) {
         FileReader reader(filename);
         if(!reader.is_open()){
             throw EncoderInitError("Failed to open file: " + filename);
@@ -57,6 +57,12 @@ public:
                 fountain_data.begin() + offset,
                 fountain_data.begin() + offset + chunk_size
             );
+
+            // Is it necessary to pad the chunk?
+            if(chunk.size() < Config::RS_DATA_SIZE){
+                chunk.resize(Config::RS_DATA_SIZE, 0); 
+            }
+
             std::vector<uint8_t> encoded = rs_encoder.encode(chunk);
             if(encoded.empty()) return {}; // TODO: Throw an exception?
             
