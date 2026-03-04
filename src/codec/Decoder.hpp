@@ -56,7 +56,7 @@ public:
     
         FileWriter writer(filename);
         if(!writer.is_open()) return false;
-        return writer.write(data);
+        return writer.write(decompressed_data);
     }
 
 private:

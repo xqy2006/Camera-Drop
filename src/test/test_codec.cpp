@@ -42,44 +42,13 @@ public:
             ++lossed_packet_;
             return;
         }
-  /*  
-        if (!raw.empty()) {
 
-            const size_t total_bits = raw.size() * 8;
-            const size_t BURST_LEN = 6;
-    
-            std::uniform_int_distribution<size_t>
-                bit_pos_dist(0, total_bits - 1);
-    
-            // 遍历 bit 流，用 error_rate 决定是否产生 burst
-            size_t bit = 0;
-            while (bit < total_bits) {
-    
-                if (prob(rng) < error_rate) {
-    
-                    size_t start = bit;
-    
-                    // flip 连续 6 bits
-                    for (size_t k = 0; k < BURST_LEN; ++k) {
-                        size_t b = start + k;
-                        if (b >= total_bits) break;
-    
-                        size_t byte_idx = b / 8;
-                        size_t bit_idx  = b % 8;
-    
-                        raw[byte_idx] ^= static_cast<uint8_t>(1u << bit_idx);
-                    }
-    
-                    // burst 后跳过，避免高度重叠
-                    bit += BURST_LEN;
-                }
-                else {
-                    ++bit;
-                }
+        for(size_t i = 0; i < raw.size(); ++i){
+            if(prob(rng) < error_rate_){ // 简单模拟 flip
+                raw[i] = ~raw[i];
             }
         }
-    */
-     //   for(int i = 0; i < std::min((size_t)10, raw.size()); ++i) raw[i] = 0;
+        
         packets_.push_back(raw);
     }
 
@@ -102,9 +71,9 @@ int main(){
 
     puts("getting encoder...");
 
-    auto data = generate_data(1024 * 1024); // 100 KB
-   // std::string str = "hello world.";
-   // std::vector<uint8_t> data(str.begin(), str.end());
+    auto data = generate_data(1024 * 1024 * 10); // 10 KB
+  //  std::string str = "hello world.";
+  //  std::vector<uint8_t> data(str.begin(), str.end());
 
     const char* inFile = "in.bin";
     const char* outFile = "out.bin";
@@ -118,10 +87,10 @@ int main(){
 
     puts("Ready to send.");
 
-    VideoChannel channel(0.3, 0.01);
+    VideoChannel channel(0.2, 0.15);
 
   //  const uint32_t packet_count = encoder.packet_count_recommended();
-    const uint32_t packet_count = encoder.packet_count_recommended() * 1.3;
+    const uint32_t packet_count = std::max(encoder.packet_count_recommended(), 10u);
 
     for(uint32_t i = 0; i < packet_count; ++i){
         auto packet = encoder.get_packet();

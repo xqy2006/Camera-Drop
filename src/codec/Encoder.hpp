@@ -36,7 +36,7 @@ public:
             data_.resize(Config::FOUNTAIN_CHUNK_SIZE + 1, 0);
         }
 
-        fountain_encoder_ = std::make_unique<FountainEncoder>(data_, encode_id_);
+        fountain_encoder_ = std::make_unique<FountainEncoder>(data_, original_size, encode_id_);
     }
 
     bool is_valid() const {
