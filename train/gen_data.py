@@ -1,16 +1,17 @@
 """
-gen_combined_data.py  —  生成合并训练数据集（单模型 6 类）
+gen_combined_data.py  —  生成合并训练数据集（单模型 5 类，detect 格式）
 
 类别：
   0  camera_drop_frame  整个 camera-drop 码包围盒
   1  qr_code            二维码整体包围盒
-  2  anchor             camera-drop TL/TR/BL 锚点
-  3  anchor_br          camera-drop BR 锚点
+  2  anchor             camera-drop TL/TR/BL 三个普通锚点（白黑白黑）
+  3  anchor_br          camera-drop BR 锚点（彩黑彩黑，用于方向识别）
   4  qr_finder          二维码定位图案（每个二维码 3 个）
-  5  hanzi_hui          汉字"回"（外观与锚点相近，作负类）
+
+标签格式：YOLO detect  cls cx cy w h（归一化，bbox 为透视变换后的外接矩形）
 
 用法：
-  python scripts/gen_combined_data.py --template build/encoded_16p4c.png --out scripts/combined_dataset --n 12000
+  python train/gen_data.py --template build/templates --out train/dataset --n 12000
 """
 
 import cv2
@@ -28,16 +29,9 @@ TEMPLATE_ANCHORS = [
     (ANCHOR_START,                          ANCHOR_START,                          ANCHOR_SIZE, ANCHOR_SIZE, 2),  # TL
     (TEMPLATE_SIZE-ANCHOR_START-ANCHOR_SIZE, ANCHOR_START,                          ANCHOR_SIZE, ANCHOR_SIZE, 2),  # TR
     (ANCHOR_START,                          TEMPLATE_SIZE-ANCHOR_START-ANCHOR_SIZE, ANCHOR_SIZE, ANCHOR_SIZE, 2),  # BL
-    (TEMPLATE_SIZE-ANCHOR_START-ANCHOR_SIZE, TEMPLATE_SIZE-ANCHOR_START-ANCHOR_SIZE, ANCHOR_SIZE, ANCHOR_SIZE, 3),  # BR
+    (TEMPLATE_SIZE-ANCHOR_START-ANCHOR_SIZE, TEMPLATE_SIZE-ANCHOR_START-ANCHOR_SIZE, ANCHOR_SIZE, ANCHOR_SIZE, 3),  # BR anchor_br
 ]
 
-FONT_CANDIDATES = [
-    "C:/Windows/Fonts/simhei.ttf",
-    "C:/Windows/Fonts/simsun.ttc",
-    "C:/Windows/Fonts/msyh.ttc",
-    "C:/Windows/Fonts/simfang.ttf",
-    "C:/Windows/Fonts/simkai.ttf",
-]
 
 
 
@@ -108,19 +102,27 @@ def scale_and_place(warped, mask, bg_w, bg_h):
     return warped, mask, px, py, post_sc
 
 
-def box_label(cls, x,y,w,h, sx,sy, M, psc, px,py, bw,bh, min_px=6):
-    x0,y0 = x*sx, y*sy
-    x1,y1 = (x+w)*sx, (y+h)*sy
-    pts = np.array([[[x0,y0]],[[x1,y0]],[[x1,y1]],[[x0,y1]]],np.float32)
-    dst = cv2.perspectiveTransform(pts,M).reshape(-1,2)*psc + [px,py]
-    xA = float(np.clip(dst[:,0].min(),0,bw)); xB = float(np.clip(dst[:,0].max(),0,bw))
-    yA = float(np.clip(dst[:,1].min(),0,bh)); yB = float(np.clip(dst[:,1].max(),0,bh))
-    if xB-xA < min_px or yB-yA < min_px: return None
-    return f"{cls} {(xA+xB)/2/bw:.6f} {(yA+yB)/2/bh:.6f} {(xB-xA)/bw:.6f} {(yB-yA)/bh:.6f}"
+def det_label(cls, x, y, w, h, sx, sy, M, psc, px, py, bw, bh, min_px=8):
+    """YOLO detect 标签：cls cx cy w h（归一化，外接轴对齐矩形）"""
+    x0, y0 = x * sx, y * sy
+    x1, y1 = (x + w) * sx, (y + h) * sy
+    pts = np.array([[[x0,y0]], [[x1,y0]], [[x1,y1]], [[x0,y1]]], np.float32)
+    dst = cv2.perspectiveTransform(pts, M).reshape(-1, 2) * psc + [px, py]
+    dst[:, 0] = np.clip(dst[:, 0], 0, bw)
+    dst[:, 1] = np.clip(dst[:, 1], 0, bh)
+    xA, xB = dst[:, 0].min(), dst[:, 0].max()
+    yA, yB = dst[:, 1].min(), dst[:, 1].max()
+    if xB - xA < min_px or yB - yA < min_px:
+        return None
+    cx = ((xA + xB) / 2) / bw
+    cy = ((yA + yB) / 2) / bh
+    rw = (xB - xA) / bw
+    rh = (yB - yA) / bh
+    return f"{cls} {cx:.6f} {cy:.6f} {rw:.6f} {rh:.6f}"
 
 
 def gen_camera_drop(template, bg_w, bg_h):
-    scale = random.uniform(0.35, 0.85)
+    scale = random.uniform(0.50, 0.92)   # 最小 0.50 确保 anchor 在训练图中 ≥20px
     tw = max(80, int(template.shape[1]*scale))
     th = max(80, int(template.shape[0]*scale))
     sx, sy = tw/template.shape[1], th/template.shape[0]
@@ -131,11 +133,12 @@ def gen_camera_drop(template, bg_w, bg_h):
 
     labels = []
     # class 0: 整帧
-    lbl = box_label(0, 0,0,template.shape[1],template.shape[0], sx,sy,M,psc,px,py,bg_w,bg_h, min_px=40)
+    lbl = det_label(0, 0,0,template.shape[1],template.shape[0], sx,sy,M,psc,px,py,bg_w,bg_h, min_px=40)
     if lbl: labels.append(lbl)
-    # class 2/3: 四个锚点
+    # class 2: TL/TR/BL 普通锚点；class 3: BR anchor_br
+    # min_px=18 确保 anchor 足够大才标注，避免训练到噪点级别的小框
     for (ax,ay,aw,ah,cls) in TEMPLATE_ANCHORS:
-        lbl = box_label(cls, ax,ay,aw,ah, sx,sy,M,psc,px,py,bg_w,bg_h)
+        lbl = det_label(cls, ax,ay,aw,ah, sx,sy,M,psc,px,py,bg_w,bg_h, min_px=18)
         if lbl: labels.append(lbl)
 
     return warped, mask, px, py, labels
@@ -163,7 +166,7 @@ def gen_qr(bg_w, bg_h):
     warped, mask, px, py, psc = scale_and_place(warped, mask, bg_w, bg_h)
 
     labels = []
-    lbl = box_label(1, 0,0,qr_w,qr_h, 1,1,M,psc,px,py,bg_w,bg_h, min_px=30)
+    lbl = det_label(1, 0,0,qr_w,qr_h, 1,1,M,psc,px,py,bg_w,bg_h, min_px=30)
     if lbl: labels.append(lbl)
     finders = [
         (bdr*bs,        bdr*bs,        7*bs, 7*bs),   # TL
@@ -171,66 +174,10 @@ def gen_qr(bg_w, bg_h):
         (bdr*bs,        (bdr+n-7)*bs,  7*bs, 7*bs),   # BL
     ]
     for (fx,fy,fw,fh) in finders:
-        lbl = box_label(4, fx,fy,fw,fh, 1,1,M,psc,px,py,bg_w,bg_h, min_px=6)
+        lbl = det_label(4, fx,fy,fw,fh, 1,1,M,psc,px,py,bg_w,bg_h, min_px=8)
         if lbl: labels.append(lbl)
 
     return warped, mask, px, py, labels
-
-
-def _find_font():
-    for fp in FONT_CANDIDATES:
-        if Path(fp).exists():
-            return fp
-    return None
-
-_HUI_FONT_PATH = None
-
-def gen_hui_patches(bg_w, bg_h, n=3):
-    global _HUI_FONT_PATH
-    try:
-        from PIL import Image as PILImage, ImageDraw, ImageFont
-    except ImportError:
-        return [], []
-
-    if _HUI_FONT_PATH is None:
-        _HUI_FONT_PATH = _find_font()
-    if _HUI_FONT_PATH is None:
-        return [], []
-
-    patches, labels = [], []
-    for _ in range(n):
-        size = random.randint(18, 140)
-        try:
-            font = ImageFont.truetype(_HUI_FONT_PATH, size=size)
-        except Exception:
-            continue
-
-        tmp = PILImage.new("RGB", (size*3, size*3))
-        bb  = ImageDraw.Draw(tmp).textbbox((0,0), "回", font=font)
-        tw, th = bb[2]-bb[0]+4, bb[3]-bb[1]+4
-        if tw < 8 or th < 8: continue
-
-        fg  = tuple(np.random.randint(0,80,3).tolist())
-        bgc = tuple(np.random.randint(160,255,3).tolist())
-        pil = PILImage.new("RGB", (tw, th), bgc)
-        ImageDraw.Draw(pil).text((2-bb[0], 2-bb[1]), "回", fill=fg, font=font)
-        char_img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-
-        if random.random() < 0.5:
-            warped_c, mask_c, _ = warp_frame(char_img, random.uniform(0.02, 0.20))
-        else:
-            warped_c = char_img
-            mask_c = np.full(char_img.shape[:2], 255, np.uint8)
-
-        cw, ch = warped_c.shape[1], warped_c.shape[0]
-        if cw >= bg_w or ch >= bg_h: continue
-
-        cpx = random.randint(0, bg_w-cw)
-        cpy = random.randint(0, bg_h-ch)
-        labels.append(f"5 {(cpx+cw/2)/bg_w:.6f} {(cpy+ch/2)/bg_h:.6f} {cw/bg_w:.6f} {ch/bg_h:.6f}")
-        patches.append((warped_c, mask_c, cpx, cpy))
-
-    return patches, labels
 
 
 
@@ -276,7 +223,7 @@ def generate_sample(templates, bg_imgs, bg_w, bg_h):
     all_labels = []
     r = random.random()
 
-    if r < 0.45:
+    if r < 0.60:
         # camera-drop 主样本
         w, m, px, py, lbls = gen_camera_drop(template, bg_w, bg_h)
         place(bg, w, m, px, py)
@@ -297,31 +244,13 @@ def generate_sample(templates, bg_imgs, bg_w, bg_h):
                 all_labels += lbls2
                 distractor_bboxes.append((px2, py2, px2 + w2.shape[1], py2 + w2.shape[0]))
 
-        # 25% 加"回"干扰
-        if random.random() < 0.25:
-            patches, lbls3 = gen_hui_patches(bg_w, bg_h, random.randint(1, 3))
-            for (pc, mc, cpx, cpy) in patches:
-                place(bg, pc, mc, cpx, cpy)
-                distractor_bboxes.append((cpx, cpy, cpx + pc.shape[1], cpy + pc.shape[0]))
-            all_labels += lbls3
-
         # 过滤被干扰物遮挡的锚点 label（遮挡面积 > 40% 则丢弃）
         all_labels += filter_occluded(anchor_lbls, distractor_bboxes, bg_w, bg_h)
 
-    elif r < 0.75:
+    else:
         # 纯 QR 码样本
         res = gen_qr(bg_w, bg_h)
         if res: w2,m2,px2,py2,lbls2 = res; place(bg,w2,m2,px2,py2); all_labels+=lbls2
-        if random.random() < 0.35:
-            patches,lbls3 = gen_hui_patches(bg_w, bg_h, random.randint(1,2))
-            for (pc,mc,cpx,cpy) in patches: place(bg,pc,mc,cpx,cpy)
-            all_labels += lbls3
-
-    else:
-        # 纯"回"字样本
-        patches,lbls3 = gen_hui_patches(bg_w, bg_h, random.randint(2,6))
-        for (pc,mc,cpx,cpy) in patches: place(bg,pc,mc,cpx,cpy)
-        all_labels += lbls3
 
     return augment(bg), all_labels
 
@@ -334,8 +263,8 @@ def main():
     ap.add_argument("--out",         default="scripts/combined_dataset")
     ap.add_argument("--n",           type=int,   default=12000)
     ap.add_argument("--val_ratio",   type=float, default=0.15)
-    ap.add_argument("--bg_w",        type=int,   default=960)
-    ap.add_argument("--bg_h",        type=int,   default=720)
+    ap.add_argument("--bg_w",        type=int,   default=640)
+    ap.add_argument("--bg_h",        type=int,   default=640)
     ap.add_argument("--backgrounds", default="")
     ap.add_argument("--seed",        type=int,   default=2026)
     args = ap.parse_args()
@@ -359,9 +288,6 @@ def main():
         import qrcode; print("qrcode 库: OK")
     except ImportError:
         print("警告：未安装 qrcode，QR 类别将跳过。运行: pip install qrcode[pil]")
-
-    fp = _find_font()
-    print(f"中文字体: {fp if fp else '未找到，hanzi_hui 类别将跳过'}")
 
     bg_imgs = []
     if args.backgrounds:
@@ -394,14 +320,14 @@ def main():
         f"path: {out_dir.resolve().as_posix()}\n"
         f"train: images/train\n"
         f"val:   images/val\n"
-        f"nc: 6\n"
+        f"nc: 5\n"
         f"names:\n"
         f"  0: camera_drop_frame\n"
         f"  1: qr_code\n"
         f"  2: anchor\n"
         f"  3: anchor_br\n"
         f"  4: qr_finder\n"
-        f"  5: hanzi_hui\n"
+        f"task: detect\n"
     )
     print(f"\n完成！数据集: {out_dir}/  训练:{n_train}  验证:{n_val}")
     print(f"YAML: {yaml_path}")
