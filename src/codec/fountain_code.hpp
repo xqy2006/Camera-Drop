@@ -9,6 +9,7 @@ extern "C" {
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <stdexcept>
 
 // 确保 wirehair_init 全局只被调用一次
 inline void wirehair_init_once() {
