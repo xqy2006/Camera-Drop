@@ -54,8 +54,12 @@ public:
     bool deserialize(const uint8_t* buffer, size_t size){
         if(size < Config::FOUNTAIN_HEADER_SIZE) return false; // impossible
         metadata_.deserialize(buffer);
-        data_.resize(size - Config::FOUNTAIN_HEADER_SIZE);
-        std::memcpy(data_.data(), buffer + Config::FOUNTAIN_HEADER_SIZE, data_.size());
+        // data_.resize(size - Config::FOUNTAIN_HEADER_SIZE);
+        // std::memcpy(data_.data(), buffer + Config::FOUNTAIN_HEADER_SIZE, data_.size());
+        size_t actual_size = size - Config::FOUNTAIN_HEADER_SIZE;
+        actual_size = std::min(actual_size, (size_t)Config::FOUNTAIN_CHUNK_SIZE);
+        data_.resize(actual_size);
+        std::memcpy(data_.data(), buffer + Config::FOUNTAIN_HEADER_SIZE, actual_size);
         return true;
     }
 
