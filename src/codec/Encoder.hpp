@@ -30,6 +30,11 @@ public:
         if(data_.empty()){
             throw EncoderInitError("Failed to compress file: " + filename);
         }
+        // Wirehair 要求分块至少为 2，故短文件需 padding。
+        uint32_t original_size = data_.size();
+        if(data_.size() <= Config::FOUNTAIN_CHUNK_SIZE){
+            data_.resize(Config::FOUNTAIN_CHUNK_SIZE + 1, 0);
+        }
 
         fountain_encoder_ = std::make_unique<FountainEncoder>(data_, encode_id_);
     }

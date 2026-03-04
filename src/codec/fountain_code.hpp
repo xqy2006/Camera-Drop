@@ -23,8 +23,8 @@ inline void wirehair_init_once() {
 
 class FountainEncoder {
 public:
-    FountainEncoder(const std::vector<uint8_t>& data, uint8_t encode_id = 0)
-        : data_(data), encode_id_(encode_id), block_cnt_(0) {
+    FountainEncoder(const std::vector<uint8_t>& data, uint32_t original_size, uint8_t encode_id = 0) 
+        : data_(data), encode_id_(encode_id), block_cnt_(0), original_size_(original_size) {
         
             wirehair_init_once();
 
@@ -46,6 +46,7 @@ public:
         meta.file_size = data_.size();
         meta.block_id = block_cnt_++;
         meta.encode_id = encode_id_;
+        meta.original_size = original_size_;
         packet.set_metadata(meta);
         std::vector<uint8_t> chunk(Config::FOUNTAIN_CHUNK_SIZE);
         uint32_t written = 0;
@@ -82,6 +83,7 @@ public:
 private:
     std::vector<uint8_t> data_;
     uint8_t encode_id_;
+    uint32_t original_size_;
     uint32_t block_cnt_;
     WirehairCodec codec_;
 };
@@ -89,7 +91,7 @@ private:
 class FountainDecoder {
 public:
     FountainDecoder()
-        : codec_(nullptr), file_size_(0), init_(false), is_complete_(false) {
+        : codec_(nullptr), file_size_(0), original_size_(0), init_(false), is_complete_(false) {
             wirehair_init();
     }
     ~FountainDecoder(){
@@ -105,6 +107,7 @@ public:
         const FountainMetadata& meta = packet.metadata();
         if(!init_){
             file_size_ = meta.file_size;
+            original_size_ = meta.original_size;
             codec_ = wirehair_decoder_create(
                 nullptr, file_size_, Config::FOUNTAIN_CHUNK_SIZE);
             if(!codec_) return false; // Oops!
@@ -142,12 +145,16 @@ public:
         );
 
         if(result != Wirehair_Success) return {}; // TODO: Throw an exception?
+       
+        recovered.resize(original_size_);
+
         return recovered;
     }
 
 private:
     WirehairCodec codec_;
     uint32_t file_size_;
+    uint32_t original_size_;
     bool init_;
     bool is_complete_;
 };

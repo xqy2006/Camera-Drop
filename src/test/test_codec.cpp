@@ -26,9 +26,10 @@ typedef std::vector<uint8_t> Packet;
 
 class VideoChannel {
 public:
-    VideoChannel(const double lr = 0.0, const double er = 0.00) : loss_rate(lr), error_rate(er) {}
+    VideoChannel(const double lr = 0.0, const double er = 0.00) : loss_rate_(lr), error_rate_(er), total_packet_(0), lossed_packet_(0) {}
     void trans(const Packet& data){
         auto raw = data;
+        ++total_packet_;
         
         static thread_local std::mt19937 rng(
             std::chrono::high_resolution_clock::now()
@@ -37,8 +38,11 @@ public:
 
         std::uniform_real_distribution<double> prob(0.0, 1.0);
 
-        if(prob(rng) < loss_rate) return; // 模拟丢包
-    
+        if(prob(rng) < loss_rate_){      // 模拟丢包
+            ++lossed_packet_;
+            return;
+        }
+  /*  
         if (!raw.empty()) {
 
             const size_t total_bits = raw.size() * 8;
@@ -74,24 +78,34 @@ public:
                 }
             }
         }
-
+    */
+     //   for(int i = 0; i < std::min((size_t)10, raw.size()); ++i) raw[i] = 0;
         packets_.push_back(raw);
     }
+
     std::vector<Packet> recieved() const {
         return packets_;
     }
+
+    int total_packet() const {return total_packet_;}
+    int lossed_packet() const {return lossed_packet_;}
+
 private:
     std::vector<Packet> packets_;
-    double loss_rate;
-    double error_rate;
+    int total_packet_;
+    int lossed_packet_;
+    double loss_rate_;
+    double error_rate_;
 };
 
 int main(){
 
-    puts("Test Codec");
+    puts("getting encoder...");
 
-    auto data = generate_data(1024 * 100); // 100 KB
-    
+    auto data = generate_data(1024 * 1024); // 100 KB
+   // std::string str = "hello world.";
+   // std::vector<uint8_t> data(str.begin(), str.end());
+
     const char* inFile = "in.bin";
     const char* outFile = "out.bin";
 
@@ -102,9 +116,12 @@ int main(){
     Encoder encoder(inFile);
     assert(encoder.is_valid());
 
-    VideoChannel channel(0.1, 0.06);
+    puts("Ready to send.");
 
-    const uint32_t packet_count = encoder.packet_count_recommended();
+    VideoChannel channel(0.3, 0.01);
+
+  //  const uint32_t packet_count = encoder.packet_count_recommended();
+    const uint32_t packet_count = encoder.packet_count_recommended() * 1.3;
 
     for(uint32_t i = 0; i < packet_count; ++i){
         auto packet = encoder.get_packet();
@@ -115,7 +132,6 @@ int main(){
 
     Decoder decoder;
 
-    int tot = recieved.size();
     int cnt = 0;
 
     for(auto& packet : recieved){
@@ -124,8 +140,9 @@ int main(){
         if(decoder.is_complete()){
             puts("Decode complete!");
             decoder.save_to_file(outFile);
-            return 0;
+            break;
         }
     }
-    printf("Decode failed. %d/%d\n", cnt, tot);
+    if(!decoder.is_complete()) puts("Decode failed.");
+    printf("sent: %d, loss: %d, decoded: %d\n", channel.total_packet(), channel.lossed_packet(), cnt); 
 }
