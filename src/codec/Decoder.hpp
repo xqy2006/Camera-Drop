@@ -52,12 +52,12 @@ public:
       
         ZstdDecompressor decompressor;
         auto decompressed = decompressor.decompress(data.data(), data.size());
-        auto data = decompressed.first;
+        auto decompressed_data = decompressed.first;
         //  if(data.empty()) return false;
     
         FileWriter writer(filename);
         if(!writer.is_open()) return false;
-        return writer.write(data);
+        return writer.write(decompressed_data);
     }
 
 private:
