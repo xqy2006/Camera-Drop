@@ -87,13 +87,14 @@ int main(){
 
     puts("Ready to send.");
 
-    VideoChannel channel(0.2, 0.15);
+    VideoChannel channel(0.1, 0.03);
 
   //  const uint32_t packet_count = encoder.packet_count_recommended();
     const uint32_t packet_count = std::max(encoder.packet_count_recommended(), 10u);
 
     for(uint32_t i = 0; i < packet_count; ++i){
         auto packet = encoder.get_packet();
+        printf("packet size: %u\n", packet.size());
         channel.trans(packet);
     }
 

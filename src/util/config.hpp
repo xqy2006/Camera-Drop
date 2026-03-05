@@ -16,7 +16,7 @@ public:
     static const uint32_t RS_PARITY_SIZE = 32; // RS 校验字节数
     static constexpr uint32_t RS_BLOCK_SIZE = RS_DATA_SIZE + RS_PARITY_SIZE;
 
-    static const uint32_t FOUNTAIN_CHUNK_SIZE = 9300;
+    static const uint32_t FOUNTAIN_CHUNK_SIZE = 8012;
     static const uint32_t FOUNTAIN_HEADER_SIZE = 12;
 
     static constexpr uint32_t MAX_FILE_SIZE = 200 * 1024 * 1024;
