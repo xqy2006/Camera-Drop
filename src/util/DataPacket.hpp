@@ -19,22 +19,20 @@ struct FountainMetadata {
     uint32_t file_size;
     uint32_t original_size;
     uint16_t block_id;
-    uint8_t encode_id;
-    uint8_t reserved;
 
     void serialize(uint8_t* buffer) const {
         std::memcpy(buffer, &file_size, 4);
         std::memcpy(buffer + 4, &original_size, 4);
         std::memcpy(buffer + 8, &block_id, 2);
-        buffer[10] = encode_id;
-        buffer[11] = reserved;
+      //  std::memcpy(buffer + 10, &encode_id, 2);
+      //  buffer[10] = encode_id;
+      //  buffer[11] = reserved;
     }
  
     void deserialize(const uint8_t* buffer){
         std::memcpy(&file_size, buffer, 4);
         std::memcpy(&original_size, buffer + 4, 4);
         std::memcpy(&block_id, buffer + 8, 2);
-        encode_id = buffer[10];
     }
 };
 
@@ -73,10 +71,9 @@ public:
     // 从字节流反序列化
     // 检验 CRC 并剥离
     bool deserialize(const uint8_t* buffer, size_t size){
-        size_t expected_size = Config::FOUNTAIN_HEADER_SIZE + Config::FOUNTAIN_CHUNK_SIZE + 4;
+        size_t expected_size = Config::FOUNTAIN_PAYLOAD_SIZE;
         
         if(size < expected_size) return false;
-        metadata_.deserialize(buffer);
 
         // data_.resize(size - Config::FOUNTAIN_HEADER_SIZE);
         // std::memcpy(data_.data(), buffer + Config::FOUNTAIN_HEADER_SIZE, data_.size());
@@ -90,8 +87,8 @@ public:
         std::memcpy(&expected_crc, buffer + expected_size - 4, 4);
         if(actual_crc != expected_crc) return false;
 
-
         metadata_.deserialize(buffer);
+
         data_.resize(Config::FOUNTAIN_CHUNK_SIZE);
         std::memcpy(data_.data(), buffer + Config::FOUNTAIN_HEADER_SIZE, Config::FOUNTAIN_CHUNK_SIZE);
         return true;

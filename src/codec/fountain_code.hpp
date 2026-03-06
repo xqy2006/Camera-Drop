@@ -45,7 +45,6 @@ public:
         FountainMetadata meta;
         meta.file_size = data_.size();
         meta.block_id = block_cnt_++;
-        meta.encode_id = encode_id_;
         meta.original_size = original_size_;
         packet.set_metadata(meta);
         std::vector<uint8_t> chunk(Config::FOUNTAIN_CHUNK_SIZE);
@@ -63,8 +62,6 @@ public:
             // TODO: Throw exception?
             chunk.clear();
         }
-
-        else chunk.resize(written);
 
         packet.set_data(chunk);
         return packet;

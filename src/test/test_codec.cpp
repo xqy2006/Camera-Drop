@@ -71,7 +71,7 @@ int main(){
 
     puts("getting encoder...");
 
-    auto data = generate_data(1024 * 1024 * 10); // 10 KB
+    auto data = generate_data(1024 * 1024 * 10); // 10 MB
   //  std::string str = "hello world.";
   //  std::vector<uint8_t> data(str.begin(), str.end());
 
@@ -87,14 +87,14 @@ int main(){
 
     puts("Ready to send.");
 
-    VideoChannel channel(0.1, 0.03);
+    VideoChannel channel(0.0, 0.05);
 
   //  const uint32_t packet_count = encoder.packet_count_recommended();
     const uint32_t packet_count = std::max(encoder.packet_count_recommended(), 10u);
 
     for(uint32_t i = 0; i < packet_count; ++i){
         auto packet = encoder.get_packet();
-        printf("packet size: %u\n", packet.size());
+      //  printf("packet size: %u\n", packet.size());
         channel.trans(packet);
     }
 

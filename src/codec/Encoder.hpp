@@ -10,8 +10,7 @@
 
 class Encoder {
 public:
-    
-    Encoder(const std::string& filename, uint8_t encode_id = 0) : encode_id_(encode_id) {
+    Encoder(const std::string& filename){
         FileReader reader(filename);
         if(!reader.is_open()){
             throw EncoderInitError("Failed to open file: " + filename);
@@ -32,11 +31,11 @@ public:
         }
         // Wirehair 要求分块至少为 2，故短文件需 padding。
         uint32_t original_size = data_.size();
-        if(data_.size() <= Config::FOUNTAIN_CHUNK_SIZE){
-            data_.resize(Config::FOUNTAIN_CHUNK_SIZE + 1, 0);
+        if(data_.size() <= Config::FOUNTAIN_PAYLOAD_SIZE){
+            data_.resize(Config::FOUNTAIN_PAYLOAD_SIZE + 1, 0);
         }
 
-        fountain_encoder_ = std::make_unique<FountainEncoder>(data_, original_size, encode_id_);
+        fountain_encoder_ = std::make_unique<FountainEncoder>(data_, original_size);
     }
 
     bool is_valid() const {
@@ -53,6 +52,7 @@ public:
         
         // 2. 对 Fountain 数据进行分块并 RS 编码
         std::vector<uint8_t> result;
+        result.reserve(Config::PACKET_CAPACITY);
         RSEncoder rs_encoder;
         
         size_t offset = 0;
@@ -83,7 +83,6 @@ public:
     }
     
 private:
-    uint8_t encode_id_;
     std::vector<uint8_t> data_;
     std::unique_ptr<FountainEncoder> fountain_encoder_;
 };
