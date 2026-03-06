@@ -5,6 +5,7 @@
  */
 
 #pragma once
+#include <string>
 #include <cstdint>
 
 class Config {
@@ -26,8 +27,12 @@ public:
 
     static constexpr uint32_t MAX_FILE_SIZE = 200 * 1024 * 1024; // 限制文件大小不超过 200 MB
     
-    static constexpr float REDUNDANCY_FACTOR = 2.0f; // 冗余系数
-
-    static const int COMPRESSION_LEVEL = 9; // Zstd 压缩等级
+    // 动态参数，可由命令行覆盖
+    inline static float REDUNDANCY_FACTOR = 2.0f; // 冗余系数
+    inline static int COMPRESSION_LEVEL = 9; // Zstd 压缩等级
+    inline static int OUTPUT_FPS = 15;       // 视频输出帧率
+    inline static std::string INPUT_VIDEO_FILE = "";
+    inline static std::string OUTPUT_VIDEO_FILE = "output.mp4";
+    inline static std::string VOUT_FILE = "vout.bin";
 };
 
