@@ -138,7 +138,7 @@ private:
         puts("  -o, --output <file>    Output file path (Default: output.mp4)");
         puts("  -z, --zstd <level>     Zstd compression level 1-22 (Default: 9)");
         puts("  -r, --redundancy <f>   Fountain redundancy factor 1.0~20.0 (Default: 2.0)");
-        puts("  -f, --fps <value>          Video FPS 1-60 (Default: 15)");
+        puts("  -f, --fps <value>      Video FPS 1-60 (Default: 15)");
         puts("  -h, --help             Show this help message");
     }
 

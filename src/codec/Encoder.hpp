@@ -74,6 +74,7 @@ public:
             result.insert(result.end(), encoded.begin(), encoded.end());
             offset += chunk_size;
         }
+        if(result.size() < Config::PACKET_CAPACITY) result.resize(Config::PACKET_CAPACITY, 0);
         return result;
     }
 
