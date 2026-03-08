@@ -1,7 +1,6 @@
 #include "image/patterns.hpp"
 #include "image/constants.hpp"
 #include "image/img_writer.hpp"
-#include "util/config.hpp"
 
 #include <cstdio>
 #include <vector>
@@ -11,9 +10,9 @@
 #include <opencv2/opencv.hpp>
 
 int main(){
-    Mat img(IMG_SIZE, IMG_SIZE, CV_8UC3, Scalar(0, 0, 0));
+    Mat img(IMG_HEIGHT, IMG_WIDTH, CV_8UC3, Scalar(0, 0, 0));
 
-    std::vector<uint8_t> raw_data(GRID_SIZE * GRID_SIZE + 1);
+    std::vector<uint8_t> raw_data(GRID_R * GRID_C + 1);
     
     uint64_t seed = std::chrono::system_clock::now().time_since_epoch().count();
     std::mt19937 rng(seed);

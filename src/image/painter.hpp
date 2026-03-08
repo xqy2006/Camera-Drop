@@ -49,12 +49,12 @@ public:
     void draw_anchors(){
         constexpr int tl_x = ANCHOR_OUT_START;
         constexpr int tl_y = ANCHOR_OUT_START;
-        constexpr int tr_x = IMG_SIZE - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
+        constexpr int tr_x = IMG_WIDTH - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
         constexpr int tr_y = ANCHOR_OUT_START;
         constexpr int bl_x = ANCHOR_OUT_START;
-        constexpr int bl_y = IMG_SIZE - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
-        constexpr int br_x = IMG_SIZE - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
-        constexpr int br_y = IMG_SIZE - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
+        constexpr int bl_y = IMG_HEIGHT - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
+        constexpr int br_x = IMG_WIDTH - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
+        constexpr int br_y = IMG_HEIGHT - ANCHOR_OUT_START - ANCHOR_L1_SIZE;
 
         draw_normal_anchor(tl_x, tl_y);  // TL: 白黑白黑
         draw_normal_anchor(tr_x, tr_y);  // TR: 白黑白黑
@@ -62,7 +62,7 @@ public:
         draw_br_anchor    (br_x, br_y);  // BR: 彩黑彩黑（方向标记）
     }
 
-    bool draw_tile(const Tile& tile, const uint8_t grid_r, const uint8_t grid_c){
+    bool draw_tile(const Tile& tile, const int grid_r, const int grid_c){
         if(is_reserved(grid_r, grid_c)) return false;
 
         int startX = MARGIN + grid_c * STRIDE;
@@ -78,7 +78,7 @@ public:
         return true;
     }
 
-    bool draw_tile(const uint8_t data, const uint8_t grid_r, const uint8_t grid_c){
+    bool draw_tile(const uint8_t data, const int grid_r, const int grid_c){
         if(is_reserved(grid_r, grid_c)) return false;
 
         int startX = MARGIN + grid_c * STRIDE;
@@ -97,9 +97,9 @@ public:
 
     static bool is_reserved(int grid_r, int grid_c){
         if(grid_r < 6 and grid_c < 6)     return true;  // TL
-        if(grid_r < 6 and grid_c > 105)   return true;  // TR
-        if(grid_r > 105 and grid_c < 6)   return true;  // BL
-        if(grid_r > 105 and grid_c > 105) return true;  // BR
+        if(grid_r < 6 and grid_c >= GRID_C - 6)   return true;  // TR
+        if(grid_r >= GRID_R - 6 and grid_c < 6)   return true;  // BL
+        if(grid_r >= GRID_R - 6 and grid_c >= GRID_C - 6) return true;  // BR
         return false;
     }
 

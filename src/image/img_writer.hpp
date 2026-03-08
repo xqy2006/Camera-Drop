@@ -16,8 +16,8 @@ void write_6bits_data(cv::Mat& img, uint8_t* data, size_t size){
     Painter painter(img);
 
     int id = 0;
-    for(uint8_t r = 0; r < GRID_SIZE; ++r){
-        for(uint8_t c = 0; c < GRID_SIZE; ++c){
+    for(int r = 0; r < Config::GRID_R; ++r){
+        for(int c = 0; c < Config::GRID_C; ++c){
             if(Painter::is_reserved(r, c)) continue;
             painter.draw_tile(data[id++], r, c);
         }

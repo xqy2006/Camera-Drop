@@ -1,9 +1,15 @@
 #pragma once
 
-const int GRID_SIZE = 112;
-const int STRIDE    = 9;
-const int MARGIN    = 8;
-const int IMG_SIZE  = 1024;
+#include "util/config.hpp"
+
+// 图像常量
+static const int IMG_WIDTH  = Config::IMG_WIDTH;
+static const int IMG_HEIGHT = Config::IMG_HEIGHT;
+static const int STRIDE     = Config::STRIDE;
+static const int MARGIN     = Config::MARGIN;
+
+static constexpr int GRID_R = (IMG_HEIGHT - MARGIN * 2) / STRIDE;
+static constexpr int GRID_C = (IMG_WIDTH - MARGIN * 2) / STRIDE;
 
 // Anchor 层级常量（TL/TR/BL 和 BR 共用相同尺寸，仅颜色不同）
 const int ANCHOR_OUT_START = 2;

@@ -1,8 +1,6 @@
-// Author: Coast23
-// Date: 2026-03-03
 /*
  基本配置
- */
+*/
 
 #pragma once
 #include <string>
@@ -10,15 +8,26 @@
 
 class Config {
 public:
-    static const uint32_t UINTS_COUNT = 12400;      // 一帧的图案单元数
-    static const uint32_t BITS_PER_UNIT = 6;        // 每个图案单元能编码的位数
-    static constexpr uint32_t UNITS_PER_BYTE =      // 每个字节能编码多少图案单元
-                                        8 / BITS_PER_UNIT;
-    static const uint32_t PACKET_CAPACITY = 9300;   // 数据包容量（字节）
+    // 图像基本配置
+    static const int IMG_WIDTH  = 2536;
+    static const int IMG_HEIGHT = 1456;
+    static const int STRIDE     = 9;
+    static const int MARGIN     = 8;
 
-    static const uint32_t RS_DATA_SIZE = 154;  // RS 数据字节数
-    static const uint32_t RS_PARITY_SIZE = 32; // RS 校验字节数
-    static constexpr uint32_t RS_BLOCK_SIZE = RS_DATA_SIZE + RS_PARITY_SIZE;
+    static constexpr int GRID_R = (IMG_HEIGHT - MARGIN * 2) / STRIDE;
+    static constexpr int GRID_C = (IMG_WIDTH - MARGIN * 2) / STRIDE;
+
+    static const uint32_t BITS_PER_UNIT = 6;                      // 每个图案单元能编码的位数 
+    static constexpr uint32_t UINTS_COUNT = GRID_R * GRID_C - 4;  // 一帧的图案单元数
+    static constexpr uint32_t UNITS_PER_BYTE =                    // 每个字节能编码多少图案单元
+                                        8 / BITS_PER_UNIT;
+    static constexpr uint32_t PACKET_CAPACITY =                   // 数据包容量（字节）
+                                        UINTS_COUNT * BITS_PER_UNIT / 8;   
+
+    static const uint32_t RS_DATA_SIZE = 154;       // RS 数据字节数
+    static const uint32_t RS_PARITY_SIZE = 32;      // RS 校验字节数
+    static constexpr uint32_t RS_BLOCK_SIZE =       // RS 块大小
+                                        RS_DATA_SIZE + RS_PARITY_SIZE;
 
     static constexpr uint32_t FOUNTAIN_PAYLOAD_SIZE = // 有效载荷（不含 ECC）大小
                                 PACKET_CAPACITY / RS_BLOCK_SIZE * RS_DATA_SIZE;
@@ -34,7 +43,7 @@ public:
     inline static int COMPRESSION_LEVEL = 9;        // Zstd 压缩等级
     inline static int OUTPUT_FPS = 15;              // 视频输出帧率
     inline static std::string INPUT_VIDEO_FILE = "";
-    inline static std::string OUTPUT_VIDEO_FILE = "output.mp4";
+    inline static std::string OUTPUT_VIDEO_FILE = "output.avi";
     inline static std::string VOUT_FILE = "vout.bin";
 };
 
