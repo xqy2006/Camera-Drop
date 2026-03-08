@@ -10,11 +10,13 @@
 #include <vector>
 #include <cstdint>
 
-// 不会函数命名
 void write_6bits_data(cv::Mat& img, uint8_t* data, size_t size){
     if(size != Config::UINTS_COUNT) return; // TODO: throw an exception
 
     Painter painter(img);
+
+    // 写入前，先交织编码（实则是随机打散）
+    Interleaver::get_instance().interleave(data, size);
 
     int id = 0;
     for(int r = 0; r < Config::GRID_R; ++r){
@@ -35,9 +37,6 @@ void write_8bits_data(cv::Mat& img, uint8_t* data, size_t size){
 
     size_t res = BitConverter::convert_826(data, size, data_6bits, data_6bits_size);
     if(res != Config::UINTS_COUNT) return; // TODO: throw an exception
-    
-    // 写入前，先交织编码（实则是随机打散）
-    Interleaver::get_instance().interleave(data_6bits, data_6bits_size);
     
     write_6bits_data(img, data_6bits, data_6bits_size);
     delete[] data_6bits;

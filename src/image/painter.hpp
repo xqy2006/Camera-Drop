@@ -8,9 +8,6 @@ using namespace cv;
 class Painter {
 public:
     Painter(Mat& img_, const bool draw_anchor = true) : img_(img_) {
-      /*  if(img_.size().width != IMG_SIZE or img_.size().height != IMG_SIZE){
-            img_.resize(IMG_SIZE, IMG_SIZE);
-        } */
         if(draw_anchor) draw_anchors();
     }
 

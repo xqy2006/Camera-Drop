@@ -1,7 +1,3 @@
-/*
- 基本配置
-*/
-
 #pragma once
 #include <string>
 #include <cstdint>
@@ -24,8 +20,14 @@ public:
     static constexpr uint32_t PACKET_CAPACITY =                   // 数据包容量（字节）
                                         UINTS_COUNT * BITS_PER_UNIT / 8;   
 
-    static const uint32_t RS_DATA_SIZE = 154;       // RS 数据字节数
-    static const uint32_t RS_PARITY_SIZE = 32;      // RS 校验字节数
+    /*
+    固定 RS 块大小为 186
+    有效 64，冗余 122，能抗 23% 左右的随机误码率
+    有效 32，冗余 154，能抗 31% 左右的随机误码率
+    有效 16，冗余 170，能抗 35% 左右的随机误码率
+    */
+    static const uint32_t RS_DATA_SIZE   = 130;     // RS 数据字节数
+    static const uint32_t RS_PARITY_SIZE = 30;      // RS 校验字节数
     static constexpr uint32_t RS_BLOCK_SIZE =       // RS 块大小
                                         RS_DATA_SIZE + RS_PARITY_SIZE;
 
@@ -39,7 +41,7 @@ public:
     static constexpr uint32_t MAX_FILE_SIZE = 200 * 1024 * 1024; // 限制文件大小不超过 200 MB
     
     // 动态参数，可由命令行覆盖
-    inline static float REDUNDANCY_FACTOR = 2.0f;   // 冗余系数
+    inline static float REDUNDANCY_FACTOR = 1.5f;   // 冗余系数
     inline static int COMPRESSION_LEVEL = 9;        // Zstd 压缩等级
     inline static int OUTPUT_FPS = 15;              // 视频输出帧率
     inline static std::string INPUT_VIDEO_FILE = "";
