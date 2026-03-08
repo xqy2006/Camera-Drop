@@ -4,6 +4,7 @@
 #include "constants.hpp"
 #include "util/config.hpp"
 #include "util/BitConverter.hpp"
+#include "codec/interleaver.hpp"
 
 #include <new>
 #include <vector>
@@ -34,6 +35,10 @@ void write_8bits_data(cv::Mat& img, uint8_t* data, size_t size){
 
     size_t res = BitConverter::convert_826(data, size, data_6bits, data_6bits_size);
     if(res != Config::UINTS_COUNT) return; // TODO: throw an exception
+    
+    // 写入前，先交织编码（实则是随机打散）
+    Interleaver::get_instance().interleave(data_6bits, data_6bits_size);
+    
     write_6bits_data(img, data_6bits, data_6bits_size);
     delete[] data_6bits;
 }
